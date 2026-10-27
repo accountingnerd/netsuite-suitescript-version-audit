@@ -1,0 +1,13 @@
+{
+  "devDependencies": {
+    "@hitc/netsuite-types": "^2026.2.2",
+    "prettier": "^3.9.9",
+    "typescript": "^6",
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.11.0",
+    "typescript-eslint": "^8.71.0"
+  },
+  "dependencies": {
+    "@types/papaparse": "^5.5.2"
+  }
+}
