@@ -11,21 +11,24 @@
  */
 
 import { file, search, runtime, log } from "N";
-import { EntryPoints } from "N/types";
+import { type EntryPoints } from "N/types";
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unused-vars -- AMD module; Papa not used yet
+import Papa = require("./papaparse");
 
 export { getInputData, map, reduce, summarize };
 
 const PARAM_OUTPUT_FOLDER = "custscript_ssva_output_folder";
 
-const SCRIPT_FOLDERS = ["SuiteScripts", "SuiteBundles", "SuiteApps"];
+const ROOT_SUITE_SCRIPTS = "SuiteScripts";
+const ROOT_SUITE_BUNDLES = "SuiteBundles";
+const ROOT_SUITE_APPS = "SuiteApps";
 
 const READ_CHUNK_SIZE = 131072; // 128 KB
 const REGEX_OVERLAP = 512;
 
 // Cache folder hierarchies within each Map/Reduce processor.
-const folderPathCache = {};
-
-type AnyFn = (arg: any) => any;
+const folderPathCache: Record<string, string> = {};
 
 /**
  * Return all JavaScript files that are visible to the executing role.
@@ -66,9 +69,8 @@ const map: EntryPoints.MapReduce.map = (context) => {
 
   let scriptFile = null;
   let fileName = searchFileName;
-  let filePath = "";
-  let folderPath = "";
-  let fileSize = getSearchValue(values.documentsize) || "";
+  let folderPath: string;
+  let fileSize: string | number = getSearchValue(values.documentsize) || "";
   let readable = true;
   let readError = "";
 
@@ -78,7 +80,7 @@ const map: EntryPoints.MapReduce.map = (context) => {
     fileName = scriptFile.name || searchFileName;
     fileSize = scriptFile.size || fileSize;
 
-    filePath = normalizePath(scriptFile.path || "");
+    const filePath = normalizePath(scriptFile.path || "");
     folderPath = getFolderFromFilePath(filePath);
   } catch (e) {
     readable = false;
@@ -145,24 +147,53 @@ const map: EntryPoints.MapReduce.map = (context) => {
   });
 };
 
+type Totals = {
+  total: number;
+  suiteScripts: number;
+  suiteBundles: number;
+  suiteApps: number;
+  version21: number;
+  version20: number;
+  version2x: number;
+  version10: number;
+  unspecified: number;
+  unknown: number;
+  unreadable: number;
+};
+
+type Row = {
+  fileId: string;
+  fileName: string;
+  folder: string;
+  source: string;
+  version: string;
+  scriptType: string;
+  action: string;
+  detectionMethod: string;
+  fileSize: string | number;
+  notes: string;
+};
+
 /**
  * Preserve one row per file for summarize().
  */
-const reduce = (context) => {
-  if (!context.values || !context.values.length) {
+const reduce: EntryPoints.MapReduce.reduce = (context) => {
+  const first = context.values[0];
+
+  if (first === undefined) {
     return;
   }
 
   context.write({
     key: context.key,
-    value: context.values[0],
+    value: first,
   });
 };
 
 /**
  * Sort the results, write the CSV, and log totals.
  */
-const summarize = (summary) => {
+const summarize: EntryPoints.MapReduce.summarize = (summary) => {
   logInputError(summary);
   logStageErrors("MAP", summary.mapSummary);
   logStageErrors("REDUCE", summary.reduceSummary);
@@ -178,7 +209,7 @@ const summarize = (summary) => {
     );
   }
 
-  const rows = [];
+  const rows: Row[] = [];
 
   summary.output.iterator().each((key, value) => {
     try {
@@ -199,31 +230,24 @@ const summarize = (summary) => {
 
   rows.sort(compareAuditRows);
 
-  const header = [
-    "File Internal ID",
-    "Script File",
-    "Folder",
-    "Source",
-    "Version",
-    "Script Type",
-    "Action",
-    "Detection Method",
-    "File Size (Bytes)",
-    "Notes",
-  ];
-
   const outputFileName =
     "SuiteScript_Version_Audit_" + createTimestamp() + ".csv";
 
   const csvFile = file.create({
     name: outputFileName,
     fileType: file.Type.CSV,
-    contents: header.map(csvEscape).join(",") + "\n",
-    encoding: file.Encoding.UTF8,
+    contents: Papa.unparse(rows, {
+      quotes: true,
+      delimiter: ",",
+      header: true,
+      newline: "\n",
+      skipEmptyLines: true,
+    }),
+    encoding: file.Encoding.UTF_8,
     folder: Number(outputFolderId),
   });
 
-  const totals = {
+  const totals: Totals = {
     total: 0,
     suiteScripts: 0,
     suiteBundles: 0,
@@ -238,23 +262,6 @@ const summarize = (summary) => {
   };
 
   rows.forEach((row) => {
-    csvFile.appendLine({
-      value: [
-        row.fileId,
-        row.fileName,
-        row.folder,
-        row.source,
-        row.version,
-        row.scriptType,
-        row.action,
-        row.detectionMethod,
-        row.fileSize,
-        row.notes,
-      ]
-        .map(csvEscape)
-        .join(","),
-    });
-
     updateTotals(totals, row);
   });
 
@@ -277,7 +284,7 @@ const summarize = (summary) => {
 /**
  * Stream the complete source file while retaining only a small overlap.
  */
-const scanScriptFile = (scriptFile) => {
+const scanScriptFile = (scriptFile: file.File) => {
   const reader = scriptFile.getReader();
 
   let carry = "";
@@ -311,7 +318,7 @@ const scanScriptFile = (scriptFile) => {
       const typeMatch = source.match(/@NScriptType\s+([^\s*]+)/i);
 
       if (typeMatch) {
-        scriptType = typeMatch[1];
+        scriptType = typeMatch[1] ?? "";
       }
     }
 
@@ -364,7 +371,7 @@ const scanScriptFile = (scriptFile) => {
   };
 };
 
-const determineAction = (version, sourceArea) => {
+const determineAction = (version: string, sourceArea: string) => {
   const installedContent =
     sourceArea === ROOT_SUITE_APPS || sourceArea === ROOT_SUITE_BUNDLES;
 
@@ -402,8 +409,14 @@ const buildNotes = ({
   scriptType,
   readable,
   readError,
+}: {
+  sourceArea: string;
+  version: string;
+  scriptType: string;
+  readable: boolean;
+  readError: string;
 }) => {
-  const notes = [];
+  const notes: string[] = [];
 
   if (!readable) {
     notes.push("Source could not be read.");
@@ -438,7 +451,7 @@ const buildNotes = ({
   return notes.join(" ");
 };
 
-const classifySourceArea = (path) => {
+const classifySourceArea = (path: string) => {
   if (!path) {
     return "";
   }
@@ -464,7 +477,10 @@ const classifySourceArea = (path) => {
  * Resolve a File Cabinet folder hierarchy. This fallback is mainly used
  * when file.load() is denied but the file's folder remains searchable.
  */
-const getFolderPath = (folderId, visited = {}) => {
+const getFolderPath = (
+  folderId: string | number,
+  visited: Record<string, boolean> = {},
+) => {
   if (!folderId) {
     return "";
   }
@@ -510,7 +526,7 @@ const getFolderPath = (folderId, visited = {}) => {
   }
 };
 
-const getFolderFromFilePath = (path) => {
+const getFolderFromFilePath = (path: string) => {
   if (!path) {
     return "";
   }
@@ -525,7 +541,7 @@ const getFolderFromFilePath = (path) => {
   return normalized.substring(0, position);
 };
 
-const normalizePath = (value) => {
+const normalizePath = (value: unknown) => {
   if (!value) {
     return "";
   }
@@ -544,7 +560,7 @@ const normalizePath = (value) => {
 };
 
 // File search folder text can look like "SuiteScripts : Custom : Lib".
-const normalizeFolderText = (value) => {
+const normalizeFolderText = (value: unknown) => {
   if (!value) {
     return "";
   }
@@ -552,7 +568,7 @@ const normalizeFolderText = (value) => {
   return normalizePath(String(value).replace(/\s+:\s+/g, "/"));
 };
 
-const getSearchValue = (value) => {
+const getSearchValue = (value: unknown): string => {
   if (value === null || value === undefined) {
     return "";
   }
@@ -562,13 +578,14 @@ const getSearchValue = (value) => {
   }
 
   if (typeof value === "object") {
-    return value.value !== undefined ? value.value : "";
+    const inner = (value as { value?: unknown }).value;
+    return inner !== undefined ? String(inner) : "";
   }
 
-  return value;
+  return String(value);
 };
 
-const getSearchText = (value) => {
+const getSearchText = (value: unknown): string => {
   if (value === null || value === undefined) {
     return "";
   }
@@ -578,13 +595,14 @@ const getSearchText = (value) => {
   }
 
   if (typeof value === "object") {
-    return value.text !== undefined ? value.text : "";
+    const text = (value as { text?: unknown }).text;
+    return text !== undefined ? String(text) : "";
   }
 
   return String(value);
 };
 
-const normalizeVersion = (version) => {
+const normalizeVersion = (version: string | undefined) => {
   const value = String(version || "").trim();
 
   if (/^2\.x$/i.test(value)) {
@@ -594,8 +612,8 @@ const normalizeVersion = (version) => {
   return value;
 };
 
-const compareAuditRows = (a, b) => {
-  const actionRank = {
+const compareAuditRows = (a: Row, b: Row) => {
+  const actionRank: Record<string, number> = {
     "CONVERT TO 2.1": 1,
     "UPDATE TO 2.1": 2,
     "CONTACT VENDOR": 3,
@@ -631,19 +649,6 @@ const compareAuditRows = (a, b) => {
   return String(a.fileName || "").localeCompare(String(b.fileName || ""));
 };
 
-/**
- * Quote CSV values and mitigate formula injection when opened in Excel.
- */
-const csvEscape = (value) => {
-  let text = value === null || value === undefined ? "" : String(value);
-
-  if (/^[=+\-@]/.test(text)) {
-    text = "'" + text;
-  }
-
-  return '"' + text.replace(/"/g, '""') + '"';
-};
-
 const createTimestamp = () => {
   return new Date()
     .toISOString()
@@ -652,7 +657,7 @@ const createTimestamp = () => {
     .replace("T", "_");
 };
 
-const updateTotals = (totals, row) => {
+const updateTotals = (totals: Totals, row: Row) => {
   totals.total++;
 
   switch (row.source) {
@@ -692,15 +697,17 @@ const updateTotals = (totals, row) => {
   }
 };
 
-const formatError = (e) => {
+const formatError = (e: unknown) => {
   if (!e) {
     return "Unknown error";
   }
 
-  return `${e.name || "ERROR"}: ${e.message || String(e)}`;
+  const err = e as { name?: string; message?: string };
+
+  return `${err.name || "ERROR"}: ${err.message || String(e)}`;
 };
 
-const logInputError = (summary) => {
+const logInputError = (summary: EntryPoints.MapReduce.summarizeContext) => {
   if (summary.inputSummary && summary.inputSummary.error) {
     log.error({
       title: "INPUT ERROR",
@@ -709,7 +716,11 @@ const logInputError = (summary) => {
   }
 };
 
-const logStageErrors = (stageName, stageSummary) => {
+const logStageErrors = (
+  stageName: string,
+  stageSummary:
+    EntryPoints.MapReduce.MapSummary | EntryPoints.MapReduce.ReduceSummary,
+) => {
   if (!stageSummary || !stageSummary.errors) {
     return;
   }
